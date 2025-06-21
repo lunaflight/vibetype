@@ -13,7 +13,7 @@ curl -o vibetype https://raw.githubusercontent.com/lunaflight/vibetype/refs/head
 
 ### System-wide access
 ```sh
-curl -o /usr/local/bin/vibetype https://raw.githubusercontent.com/lunaflight/vibetype/refs/heads/main/vibetype && sudo chmod +x /usr/local/bin/vibetype
+sudo curl -o /usr/bin/vibetype https://raw.githubusercontent.com/lunaflight/vibetype/refs/heads/main/vibetype && sudo chmod +x /usr/bin/vibetype
 ```
 ```sh
 vibetype --help
