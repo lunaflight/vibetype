@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+
+import curses
+import time
+import random
+import argparse
+import urllib.request
+import urllib.error
+import sys
+import pathlib
+import tempfile
+import hashlib
+
+# --- Configuration & Word List ---
+DEFAULT_WORD_COUNT = 20
+MAX_WIDTH = 80
+DEFAULT_WORD_LIST = [
+    "the", "be", "to", "of", "and", "a", "in", "that", "have", "I", "it", "for",
+    "not", "on", "with", "he", "as", "you", "do", "at", "this", "but", "his",
+    "by", "from", "they", "we", "say", "her", "she", "or", "an", "will", "my",
+    "one", "all", "would", "there", "their", "what", "so", "up", "out", "if",
+    "about", "who", "get", "which", "go", "me", "when", "make", "can", "like",
+    "time", "no", "just", "him", "know", "take", "people", "into", "year",
+    "your", "good", "some", "could", "them", "see", "other", "than", "then",
+    "now", "look", "only", "come", "its", "over", "think", "also", "back",
+    "after", "use", "two", "how", "our", "work", "first", "well", "way",
+    "even", "new", "want", "because", "any", "these", "give", "day", "most", "us"
+]
+
+# --- Word List Sources ---
+WORD_LIST_SOURCES = {
+    "default": None,
+    "top-1000-en": "https://gist.githubusercontent.com/deekayen/4148741/raw/98d35708fa344717d8eee15d11987de6c8e26d7d/1-1000.txt"
+}
+
+
+class Colors:
+    """A simple class to hold and manage curses color pairs."""
+    def __init__(self):
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        self.GREEN = curses.color_pair(1)
+        curses.init_pair(2, curses.COLOR_RED, -1)
+        self.RED = curses.color_pair(2)
+        curses.init_pair(3, curses.COLOR_WHITE, -1)
+        self.DEFAULT = curses.color_pair(3)
+        # Restored YELLOW color pair
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)
+        self.YELLOW = curses.color_pair(4)
+        self.GREY = self.DEFAULT | curses.A_DIM
+
+def get_word_list(source):
+    """
+    Intelligently fetches a word list from a keyword, URL, or local file path.
+    Caches resources fetched from URLs.
+    """
+    if source == "default":
+        return DEFAULT_WORD_LIST
+    
+    if source in WORD_LIST_SOURCES:
+        url = WORD_LIST_SOURCES[source]
+    elif source.startswith("http://") or source.startswith("https://"):
+        url = source
+    else:
+        file_path = pathlib.Path(source)
+        if not file_path.is_file():
+            print(f"Error: Word list file not found at '{source}'", file=sys.stderr)
+            sys.exit(1)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return [line.strip() for line in f.readlines() if line.strip()]
+        except IOError as e:
+            print(f"Error: Could not read file at '{source}'. Reason: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    hashed_name = hashlib.md5(url.encode()).hexdigest()
+    cache_dir = pathlib.Path(tempfile.gettempdir()) / "vibetype_cache"
+    cache_file = cache_dir / f"{hashed_name}.txt"
+
+    if cache_file.is_file():
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            return [line.strip() for line in f.readlines() if line.strip()]
+
+    try:
+        with urllib.request.urlopen(url) as response:
+            if response.getcode() == 200:
+                content = response.read().decode('utf-8')
+                word_list = [word.strip() for word in content.splitlines() if word.strip()]
+                
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    with open(cache_file, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                except IOError as e:
+                    print(f"Warning: Could not write cache file to {cache_file}. Reason: {e}", file=sys.stderr)
+
+                return word_list
+            else:
+                print(f"Error: Failed to fetch word list. Status code: {response.getcode()}", file=sys.stderr)
+                sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Error: Network error fetching word list from {url}", file=sys.stderr)
+        print(f"Reason: {e.reason}", file=sys.stderr)
+        sys.exit(1)
+
+def generate_words(word_list, count):
+    """Selects a random list of words for the test."""
+    if count > len(word_list):
+        count = len(word_list)
+    return random.sample(word_list, count)
+
+def draw_box(stdscr, y, x, h, w):
+    """Draws a simple ASCII-style box using curses."""
+    try:
+        stdscr.vline(y + 1, x, curses.ACS_VLINE, h - 2)
+        stdscr.vline(y + 1, x + w - 1, curses.ACS_VLINE, h - 2)
+        stdscr.hline(y, x + 1, curses.ACS_HLINE, w - 2)
+        stdscr.hline(y + h - 1, x + 1, curses.ACS_HLINE, w - 2)
+        stdscr.addch(y, x, curses.ACS_ULCORNER)
+        stdscr.addch(y, x + w - 1, curses.ACS_URCORNER)
+        stdscr.addch(y + h - 1, x, curses.ACS_LLCORNER)
+        stdscr.addch(y + h - 1, x + w - 1, curses.ACS_LRCORNER)
+    except curses.error: pass
+
+def render_screen(stdscr, colors, state):
+    """Renders the entire UI based on the current game state."""
+    stdscr.erase()
+    term_height, term_width = stdscr.getmaxyx()
+
+    effective_width = min(MAX_WIDTH, term_width - 2)
+    left_padding = (term_width - (effective_width + 2)) // 2
+    if left_padding < 0: left_padding = 0
+    max_content_width = effective_width - 2
+
+    wrapped_lines = []
+    current_line = []
+    current_line_len = 0
+
+    for i, target_word in enumerate(state['target_words']):
+        word_len = len(target_word)
+        if current_line and current_line_len + word_len + 1 > max_content_width:
+            wrapped_lines.append(current_line)
+            current_line, current_line_len = [], 0
+        
+        current_line_len += word_len + 1
+        
+        word_to_draw = []
+        if i < state['current_word_index']:
+            color = colors.GREEN if state['user_typed_words'][i] == target_word else colors.RED
+            word_to_draw.append((target_word, color))
+        elif i == state['current_word_index']:
+            # Restored yellow letter logic
+            for j, char in enumerate(target_word):
+                color = colors.GREY
+                mistake_coord = (i, j)
+                if j < len(state['current_input']):
+                    if state['current_input'][j] == char:
+                        color = colors.YELLOW if mistake_coord in state['mistake_map'] else colors.GREEN
+                    else:
+                        color = colors.RED
+                word_to_draw.append((char, color))
+        else:
+            word_to_draw.append((target_word, colors.GREY))
+            
+        current_line.append(word_to_draw)
+
+    if current_line:
+        wrapped_lines.append(current_line)
+    
+    state['box_height'] = len(wrapped_lines)
+    if state['box_height'] == 0: state['box_height'] = 1
+
+    box_y = 2
+    draw_box(stdscr, box_y, left_padding, state['box_height'] + 2, effective_width + 2)
+    input_box_y = box_y + state['box_height'] + 2
+    draw_box(stdscr, input_box_y, left_padding, 3, effective_width + 2)
+
+    for i, line in enumerate(wrapped_lines):
+        x_offset = left_padding + 2
+        for word_parts in line:
+            for part, color in word_parts:
+                try:
+                    stdscr.addstr(box_y + 1 + i, x_offset, part, color)
+                    x_offset += len(part)
+                except curses.error: pass
+            try:
+                stdscr.addstr(box_y + 1 + i, x_offset, " ")
+                x_offset += 1
+            except curses.error: pass
+            
+    try:
+        stdscr.addstr(input_box_y + 1, left_padding + 2, f"> {state['current_input']}")
+    except curses.error: pass
+
+    try:
+        counter_text = f" {state['current_word_index']} / {len(state['target_words'])} "
+        stdscr.addstr(box_y + state['box_height'] + 1, left_padding + effective_width - len(counter_text), counter_text, colors.DEFAULT)
+        wpm_text = f" WPM: {state['wpm']} "
+        stdscr.addstr(input_box_y + 2, left_padding + effective_width - len(wpm_text), wpm_text, colors.DEFAULT)
+    except curses.error: pass
+
+    if state['game_state'] == "complete":
+        render_completion_stats(stdscr, colors, state, term_width, term_height)
+
+    if state['game_state'] == 'typing':
+        try:
+            stdscr.move(input_box_y + 1, left_padding + 4 + len(state['current_input']))
+        except curses.error: pass
+
+    stdscr.refresh()
+
+def render_completion_stats(stdscr, colors, state, term_width, term_height):
+    """Draws the final statistics below the main UI."""
+    msg1 = "Test Complete!"
+    msg2 = f"Final WPM: {state['wpm']}"
+    msg3 = f"Accuracy: {state['accuracy']:.1f}%"
+    msg4 = "Press any key to exit."
+    
+    start_y = 2 + state['box_height'] + 2 + 3 + 2
+    try:
+        stdscr.addstr(start_y, (term_width - len(msg1)) // 2, msg1, colors.GREEN)
+        stdscr.addstr(start_y + 1, (term_width - len(msg2)) // 2, msg2, colors.DEFAULT)
+        stdscr.addstr(start_y + 2, (term_width - len(msg3)) // 2, msg3, colors.DEFAULT)
+        stdscr.addstr(start_y + 4, (term_width - len(msg4)) // 2, msg4, colors.GREY)
+    except curses.error: pass
+
+def main(stdscr, number, word_list):
+    """Main function to run the application."""
+    curses.curs_set(1)
+    stdscr.timeout(1000)
+    colors = Colors()
+    
+    state = {
+        "target_words": generate_words(word_list, number),
+        "user_typed_words": [],
+        "current_word_index": 0,
+        "current_input": "",
+        "wpm": 0,
+        "accuracy": 0.0,
+        "start_time": 0,
+        "box_height": 1,
+        "game_state": "typing",
+        "mistake_map": set() # Restored mistake tracking
+    }
+
+    while True:
+        if state['start_time'] != 0 and state['game_state'] == 'typing':
+            elapsed = max(time.time() - state['start_time'], 1)
+            typed_chars_in_completed = len(" ".join(state['user_typed_words']))
+            if state['user_typed_words']: typed_chars_in_completed += 1
+            total_typed_chars = typed_chars_in_completed + len(state['current_input'])
+            
+            state['wpm'] = int((total_typed_chars / 5) / (elapsed / 60))
+
+        render_screen(stdscr, colors, state)
+        
+        try:
+            key_code = stdscr.getch()
+        except curses.error: continue
+
+        if key_code == curses.KEY_RESIZE:
+            continue
+
+        if state['game_state'] == "typing":
+            if state['start_time'] == 0 and key_code != -1:
+                state['start_time'] = time.time()
+                
+            if key_code in (curses.KEY_BACKSPACE, 127, 8):
+                state['current_input'] = state['current_input'][:-1]
+            elif key_code == ord(' ') or key_code in (curses.KEY_ENTER, 10, 13):
+                if state['current_input']:
+                    state['user_typed_words'].append(state['current_input'])
+                    state['current_word_index'] += 1
+                    state['current_input'] = ""
+                    if state['current_word_index'] == len(state['target_words']):
+                        state['game_state'] = "complete"
+                        curses.curs_set(0)
+                        
+                        correct_chars = sum(len(w) for u, w in zip(state['user_typed_words'], state['target_words']) if u == w)
+                        total_chars = sum(len(w) for w in state['user_typed_words'])
+                        state['accuracy'] = (correct_chars / total_chars * 100) if total_chars > 0 else 0
+                        
+                        elapsed = max(time.time() - state['start_time'], 1)
+                        state['wpm'] = int((len(" ".join(state['user_typed_words']))/ 5) / (elapsed / 60))
+
+            elif key_code != -1:
+                try:
+                    char = chr(key_code)
+                    state['current_input'] += char
+                    
+                    # Restored mistake logging
+                    char_index = len(state['current_input']) - 1
+                    target_word = state['target_words'][state['current_word_index']]
+                    if char_index < len(target_word) and char != target_word[char_index]:
+                        mistake_coord = (state['current_word_index'], char_index)
+                        state['mistake_map'].add(mistake_coord)
+
+                except ValueError: pass
+        
+        elif state['game_state'] == "complete":
+            if key_code != -1: break
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(
+        description="A Monkeytype-like typing test in your terminal.",
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument("-n", "--number", type=int, default=DEFAULT_WORD_COUNT,
+                        help=f"Number of words for the test.\n(default: {DEFAULT_WORD_COUNT})")
+    parser.add_argument("-w", "--word-list", type=str, default="default",
+                        help="""Select the word list source.
+Can be a keyword ('default', 'top-1000-en'),
+a URL (https://...),
+or a local file path.
+Words should be separated by newlines.
+(default: 'default')""")
+    args = parser.parse_args()
+    
+    chosen_word_list = get_word_list(args.word_list)
+    if not chosen_word_list:
+        print("Error: Could not load the specified word list.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        curses.wrapper(main, args.number, chosen_word_list)
+    except KeyboardInterrupt:
+        pass
